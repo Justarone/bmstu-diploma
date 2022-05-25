@@ -76,42 +76,39 @@
 \hypersetup{citecolor=black}
 
 \usepackage{listings}
+
 \lstset{
-	basicstyle=\footnotesize\ttfamily,
-	language=[Sharp]C, % Или другой ваш язык -- см. документацию пакета
-	commentstyle=\color{comment},
-	numbers=left,
-	numberstyle=\tiny\color{plain},
-	numbersep=5pt,
-	tabsize=4,
-	extendedchars=\true,
-	breaklines=true,
-	keywordstyle=\color{blue},
-	frame=b,
-	stringstyle=\ttfamily\color{string}\ttfamily,
-	showspaces=false,
-	showtabs=false,
-	xleftmargin=17pt,
-	framexleftmargin=17pt,
-	framexrightmargin=5pt,
-	framexbottommargin=4pt,
-	showstringspaces=false,
-	inputencoding=utf8x,
-	keepspaces=true
+    basicstyle=\fontsize{11}{10}\selectfont\ttfamily,
+    language=C++,
+    texcl=true,
+    numbers=left,
+    numbersep=5pt,
+    tabsize=4,
+    extendedchars=\true,
+    breaklines=true,
+    keywordstyle=\bfseries\color{blue},
+    frame=single,
+    xleftmargin=17pt,
+    %framexleftmargin=17pt,
+    framexrightmargin=5pt,
+    framexbottommargin=4pt,
+    showstringspaces=false,
+    inputencoding=utf8x,
+    keepspaces=true,
 }
 
-\DeclareCaptionLabelSeparator{line}{\ --\ }
-\DeclareCaptionFont{white}{\color{white}}
-\DeclareCaptionFormat{listing}{\colorbox[cmyk]{0.43,0.35,0.35,0.01}{\parbox{\textwidth}{\hspace{15pt}#1#2#3}}}
-\captionsetup[lstlisting]{
-	format=listing,
-	labelfont=white,
-	textfont=white,
-	singlelinecheck=false,
-	margin=0pt,
-	font={bf,footnotesize},
-	labelsep=line
-}
+%\DeclareCaptionLabelSeparator{line}{\ --\ }
+%\DeclareCaptionFont{white}{\color{white}}
+%\DeclareCaptionFormat{listing}{\colorbox[cmyk]{0.43,0.35,0.35,0.01}{\parbox{\textwidth}{\hspace{15pt}#1#2#3}}}
+%\captionsetup[lstlisting]{
+	%format=listing,
+	%labelfont=white,
+	%textfont=white,
+	%singlelinecheck=false,
+	%margin=0pt,
+	%font={bf,footnotesize},
+	%labelsep=line
+%}
 
 \usepackage{ulem} % Нормальное нижнее подчеркивание
 \usepackage{hhline} % Двойная горизонтальная линия в таблицах
@@ -124,7 +121,7 @@
 \makeatother
 
 \usepackage{color}
-\usepackage[cache=false, newfloat]{minted}
+\usepackage[cache=false, outputdir=cache, newfloat]{minted}
 \newenvironment{code}{\captionsetup{type=listing}}{}
 \SetupFloatingEnvironment{listing}{name=Листинг}
 

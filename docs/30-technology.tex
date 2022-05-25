@@ -1,11 +1,164 @@
 \section{Технологическая часть}
 
-\subsection{Код получившейся структуры}
+В данном разделе рассматриваются используемые инструменты и технологии для реализации описанного метода, а также сама реализация.
 
-\subsection{Код добавления нового блока}
+\subsection{Выбор инструментов и технологий}
 
-\subsection{Код слияния блоков}
+В качестве языка программирования был выбран C++ \cite{cpp} в связи с тем, что на этом языке программирования написана СУБД ClickHouse, для которой данный метод реализуется.
 
-\subsection{Код корректировки при изменении данных}
+
+В качестве компилятора был выбран компилятор Clang \cite{clang} 12 версии в связи с тем, что на официальном сайте ClickHouse рекомендуется использовать Clang выше 11 версии \cite{chcompiler}.
+
+Для сборки проекта используются утилиты CMake \cite{cmake} и Ninja \cite{ninjabuild}, в проекте уже присутствуют требуемые конфигурационные файлы и сборка полностью автоматизирована.
+
+\subsection{Код объекта, отвечающего за построение цепи хеш-сумм}
+
+Для проверки и расчета цепи хеш-сумм используется класс \\ \texttt{MergeTreeDataChainer}. Его интерфейс представлен в листинге \ref{code:interface}. Публичный интерфейс состоит из следующих методов:
+\begin{enumerate}
+    \item \texttt{precommitChain} --- проверяет, что текущая цепь хеш-сумм валидна и записывает в журнал значение новой. В качестве аргументов получает текущую цепь, элемент, который добавляется в цепь, вектор элементов, которые удаляются из цепи, а также блокировку на использование кусков. Возвращает булево значение, было ли записано значение в журнал (не записывается в случае неверной цепочки на момент вызова метода).
+    \item \texttt{checkConsistency} --- проверяет цепь. На вход получает набор кусков, а также блокировку на использование кусков.
+    \item \texttt{commitChain} --- фиксирует значение цепи хеш-сумм, перенося его из журнала в файл цепи. На вход получает блокировку на использование кусков.
+\end{enumerate}
+
+\pagebreak
+
+\begin{lstlisting}[label=code:interface, caption={Класс \texttt{MergeTreeDataChainer}.}]
+class MergeTreeDataChainer {
+    using Checksum = UInt64;
+    using Checksums = std::vector<Checksum>;
+
+public:
+    MergeTreeDataChainer(DiskPtr disk, String relative_storage_path,
+        Poco::Logger *log = nullptr);
+    bool precommitChain(DataParts &data_parts, const
+        DataPartPtr &part_to_add,
+        const DataPartsVector &parts_to_remove,
+        const DataPartsLock &lock);
+    CheckResult checkConsistency(const DataParts &data_parts,
+        const DataPartsLock & /*lock*/);
+    void commitChain(const DataPartsLock & /*lock*/);
+
+private:
+    Checksums calculateChain(const DataParts &data_parts);
+    std::optional<String> compareChains(const Checksums &checksums,
+        const Checksums &written, const DataParts &data_parts);
+    static void transformToFutureState(DataParts &data_parts,
+        const DataPartPtr &part_to_add,
+        const DataPartsVector &parts_to_remove);
+    CommitFinisherPtr precommitChain(const DataParts &data_parts,
+        const DataPartsLock & /*lock*/);
+    void updateFromOnePart(SipHash &hash, const DataPart &data_parts);
+
+    State state;
+    Poco::Logger *log;
+};
+\end{lstlisting}
+
+Метод, отвечающий за проверки корректности цепи хеш-сумм, представлен в листинге \ref{code:validation}. Данный код сначала проверяет соответствие цепочки зафиксированному в файле значению. Если обнаруживается несовпадение, то результат сравнивается с значением из журнала. Если не совпадает со значением из журнала, то возвращается ошибка.
+
+\pagebreak
+
+\begin{lstlisting}[label=code:validation, caption={Валидация цепи хеш-сумм.}]
+CheckResult MergeTreeData::MergeTreeDataChainer::checkConsistency(
+        const DataParts &data_parts, const DataPartsLock & /*lock*/) {
+    const auto checksums = calculateChain(data_parts);
+    const auto commited = state.readCommited();
+    auto error = compareChains(checksums, commited, data_parts);
+    if (!error)
+        return CheckResult("parts chain", true, "");
+
+    const auto pending = state.readPending();
+    error = compareChains(checksums, pending, data_parts);
+    if (!error) {
+        if (log)
+            log->warning(
+                    "parts chain is verified with pending value, rewriting commited");
+        state.writeCommited(checksums);
+        return CheckResult("parts chain", true, "");
+    }
+    return CheckResult("parts chain", false, std::move(*error));
+}
+\end{lstlisting}
+
+Сравнение цепей хеш-сумм сводится к сравнению 2 векторов. Код, рассчитывающий значение цепи хеш-сумм, представлен в листинге \ref{code:calcchain}. Цепь представляется вектором хешей, где хеш --- число размером 8 байт. Для расчета хешей используется хеш-функция \texttt{SipHash}. Для каждого очередного в качестве значения используются хеш-суммы всех файлов, имеющихся в куске, а также хеш-предыдущего куска (для первого куска используется 0).
+
+\pagebreak
+
+\begin{lstlisting}[label=code:calcchain, caption={Расчет цепи хеш-сумм.}]
+MergeTreeData::MergeTreeDataChainer::Checksums
+MergeTreeData::MergeTreeDataChainer::calculateChain(
+        const DataParts &data_parts) {
+    Checksums result;
+    result.reserve(data_parts.size());
+
+    SipHash prev{0, 0};
+    for (const auto &part : data_parts) {
+        SipHash hash{0, 0};
+        hash.update(prev);
+        updateFromOnePart(hash, *part);
+
+        const auto hash_value = hash.get64();
+        prev = hash;
+        result.push_back(hash_value);
+    }
+    return result;
+}
+void MergeTreeData::MergeTreeDataChainer::updateFromOnePart(
+        SipHash &hash, const DataPart &data_part) {
+    for (const auto &[file, checksum] : data_part.checksums.files) {
+        hash.update(file);
+        hash.update(checksum);
+    }
+}
+\end{lstlisting}
+
+Код метода \texttt{precommitChain} представлен в листинге \ref{code:precommitChain}. В данном методе происходят следующие действия:
+\begin{enumerate}
+    \item проверятся консистентность цепи для текущего списка активных кусков;
+    \item если проверка успешна, то к текущему списку добавляется кусок на добавление, и удаляются куски, которые требуется удалить;
+    \item для нового состояние активных блоков высчитывается цепочка и записывается в журнал.
+\end{enumerate}
+
+\pagebreak
+
+\begin{lstlisting}[label=code:precommitChain, caption={Метод \texttt{precommitChain}.}]
+MergeTreeData::MergeTreeDataChainer::CommitFinisherPtr
+MergeTreeData::MergeTreeDataChainer::precommitChain(
+    DataParts &data_parts, const DataPartPtr &part_to_add,
+    const DataPartsVector &parts_to_remove, const DataPartsLock &lock)
+{
+    if (!checkConsistency(data_parts, lock).success) {
+        if (log)
+            log->error("Parts chain is inconsistent (force update: " +
+                                 std::to_string(force_updates) + ")");
+        if (!force_updates)
+            return false;
+    }
+    transformToFutureState(data_parts, part_to_add, parts_to_remove);
+    return precommitChain(data_parts, lock);
+}
+
+MergeTreeData::MergeTreeDataChainer::CommitFinisherPtr
+MergeTreeData::MergeTreeDataChainer::precommitChain(
+    const DataParts &data_parts, const DataPartsLock & /*lock*/)
+{
+    const auto checksum = calculateChain(data_parts);
+    state.writePending({checksum});
+    return true;
+}
+
+void MergeTreeData::MergeTreeDataChainer::transformToFutureState(
+    DataParts &data_parts, const DataPartPtr &part_to_add,
+    const DataPartsVector &parts_to_remove)
+{
+    data_parts.insert(part_to_add);
+    for (const auto &part : parts_to_remove)
+        data_parts.erase(part);
+}
+\end{lstlisting}
+
+\subsection{Код изменения состояний активных блоков}
+
+Как было описано в аналитической части и в схемах алгоритмов, улучшение метода хранения, которое позволяет доказывать неправомерное удаление, работает в тот момент, когда происходит изменения состояний блоков. Это происходит в функции \texttt{renameTempPartAndReplace} класса \texttt{MergeTreeData}. Код с использованием цепи хеш-сумм, описан в листингах \ref{code:updrename} и \ref{code:updrename2} в приложении А.
 
 \pagebreak

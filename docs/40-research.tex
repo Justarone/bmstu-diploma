@@ -1,11 +1,485 @@
 \section{Исследовательская часть}
 
-В рамках исследование планируется проверить, насколько сложно взломать систему без наличия и с наличием шифрования в системе.
+В данном разделе будет показаны действия, которые требуется сделать, чтобы обмануть систему без шифрования данных, а также будет показано, что система обнаруживает неправомерные действия с наличием шифрования.
 
-\subsection{Обход механизма защиты при отсутствии шифровании данных}
+\subsection{Обход механизма защиты при отсутствии шифрования данных}
 
-\subsection{Невозможность обхода защиты при наличии шифрования данных}
+Рассмотрение для 2 форматов хранения:
+\begin{enumerate}
+    \item компактное;
+    \item широкое.
+\end{enumerate}
+
+\subsubsection{Компактное хранение}
+
+Необходимо создать таблицу и поместить в нее данные. Эти действия выполняются запросами, представленными в листинге \ref{code:createtable1}.
+
+\begin{lstlisting}[language=sql, label=code:createtable1, caption={Создание таблицы с компактным хранением.}]
+CREATE TABLE cats
+(
+    `id` UInt64 CODEC(NONE),
+    `name` String CODEC(NONE),
+    `age` UInt64 CODEC(NONE)
+)
+ENGINE = MergeTree
+ORDER BY id
+SETTINGS min_bytes_for_wide_part = 1000000000, min_rows_for_wide_part = 1000000000, use_parts_chainer = 1
+
+INSERT INTO cats VALUES (1, 'Murka', 11), (2, 'Elsa', 18), (3, 'Cleo', 5)
+\end{lstlisting}
+
+Как было показано в конструкторской части, при изменении какого-то блока данных требуется пересчитать 3 хеш-суммы куска и цепь хеш-сумм. Пусть требуется выставить столбцу значение $age = 4$, где $id = 3$. Данные на диске выглядят так, как показано в листинге \ref{code:raw}.
+
+\pagebreak
+
+\begin{lstlisting}[label=code:raw, caption={Данные записанного куска в сыром виде.}]
+hexdump -C all_1_1_0/data.bin
+39 32 97 f2 20 a1 0f 9e  d5 82 4c 8a 1c 64 a7 74  |92.. .....L..d.t|
+02 21 00 00 00 18 00 00  00 01 00 00 00 00 00 00  |.!..............|
+00 02 00 00 00 00 00 00  00 03 00 00 00 00 00 00  |................|
+00 5c 43 37 3f 94 e6 65  eb 4d fb 60 68 3a 35 85  |.\C7?..e.M.`h:5.|
+4d 02 19 00 00 00 10 00  00 00 05 4d 75 72 6b 61  |M..........Murka|
+04 45 6c 73 61 04 43 6c  65 6f d8 cd aa 90 8a 0a  |.Elsa.Cleo......|
+4a 0a 5f c3 97 cd bd e9  58 3d 02 21 00 00 00 18  |J._.....X=.!....|
+00 00 00 0b 00 00 00 00  00 00 00 12 00 00 00 00  |................|
+00 00 00 05 00 00 00 00  00 00 00                 |...........|
+\end{lstlisting}
+
+Если разобрать по байтам, получится:
+\begin{enumerate}
+    \item 16 байт --- хеш-сумма для сжатого блока (1 столбца);
+    \item 9 байт --- заголовок кодека, состоящий из:
+    \begin{itemize}
+        \item [---] 1 байт --- метод;
+        \item [---] 4 байта --- размер сжатых данных (с заголовком);
+        \item [---] 4 байта --- размер исходных данных.
+    \end{itemize}
+    \item 24 байта --- 3 числа по 8 байт --- столбец \texttt{id};
+    \item 16 и 9 байт аналогично на хеш-сумму и заголовок кодека для 2 столбца;
+    \item 16 байт --- строки <<Murka>>, <<Elsa>> и <<Cleo>> и перед ними числа размером 1 байт;
+    \item 16 и 9 байт аналогично на хеш-сумму и заголовок кодека для 3 столбца;
+    \item 24 байта --- 3 числа по 8 байт --- столбец \texttt{age}.
+    \end{enumerate}
+\end{enumerate}
+
+Таким образом требуется поменять:
+\begin{enumerate}
+    \item 1 байт --- значение числа, которое хотим поменять;
+    \item 16 байт --- хеш-сумма столбца (блока сжатых данных).
+\end{enumerate}
+
+После замены файл \texttt{data.bin} будет выглядеть как в листинге \ref{code:newdata}.
+
+\pagebreak
+
+\begin{lstlisting}[label=code:newdata, caption={Данные записанного куска в сыром виде после исправления.}]
+39 32 97 f2 20 a1 0f 9e  d5 82 4c 8a 1c 64 a7 74  |92.. .....L..d.t|
+02 21 00 00 00 18 00 00  00 01 00 00 00 00 00 00  |.!..............|
+00 02 00 00 00 00 00 00  00 03 00 00 00 00 00 00  |................|
+00 5c 43 37 3f 94 e6 65  eb 4d fb 60 68 3a 35 85  |.\C7?..e.M.`h:5.|
+4d 02 19 00 00 00 10 00  00 00 05 4d 75 72 6b 61  |M..........Murka|
+04 45 6c 73 61 04 43 6c  65 6f 75 37 d2 0b 34 77  |.Elsa.Cleou7..4w|
+72 89 c2 7a f3 1c 62 ef  ee 97 02 21 00 00 00 18  |r..z..b....!....|
+00 00 00 0b 00 00 00 00  00 00 00 12 00 00 00 00  |................|
+00 00 00 04 00 00 00 00  00 00 00                 |...........|
+\end{lstlisting}
+
+При проверке состояния таблицы получается результат, описанный в листинге \ref{code:errchecksum}.
+
+\begin{lstlisting}[label=code:errchecksum, caption={Результат проверки.}]
+CHECK TABLE cats
+format Vertical
+
+Query id: dbcbc244-10f0-491d-85e7-849377ac73e0
+
+Row 1:
+──────
+part_path: all_1_1_0
+is_passed: 0
+message: Checksum mismatch for file data.bin in data part
+\end{lstlisting}
+
+Была заменена хеш-сумма сжатого блока, однако не были заменены хеш-суммы сжатых и расжатых данных, описанные в \texttt{checksums.txt}, который описан в листинге \ref{code:checksumsold}.
+
+\begin{lstlisting}[label=code:checksumsold, caption={Хеш-суммы, описанные в файле \texttt{checksums.txt}.}]
+63 68 65 63 6b 73 75 6d  73 20 66 6f 72 6d 61 74  |checksums format|
+20 76 65 72 73 69 6f 6e  3a 20 34 0a 67 cf 30 a7  | version: 4.g.0.|
+25 ce b0 4e 0e 75 28 87  2a 91 be 42 82 8e 00 00  |%..N.u(.*..B....|
+00 84 00 00 00 f1 3c 04  09 63 6f 75 6e 74 2e 74  |......<..count.t|
+78 74 01 96 fc d9 4b 53  ab 22 6f 33 9a be c4 ce  |xt....KS."o3....|
+28 da 5d 00 08 64 61 74  61 2e 62 69 6e 8b 01 5c  |(.]..data.bin..\|
+70 1c a6 71 6a e6 e7 f3  d7 70 27 28 d3 99 12 01  |p..qj....p'(....|
+40 24 e8 86 e7 dd 22 a9  de f5 3b 07 c6 0f 91 6d  |@$...."...;....m|
+7e 09 2d 00 f0 25 6d 72  6b 33 70 eb db 30 3d 91  |~.-..%mrk3p..0=.|
+74 86 b7 33 12 22 5a 25  89 00 cb 00 0b 70 72 69  |t..3."Z%.....pri|
+6d 61 72 79 2e 69 64 78  10 f6 15 da b1 a5 50 1e  |mary.idx......P.|
+18 54 ae 68 d7 22 30 aa  ee 00                    |.T.h."0...|
+\end{lstlisting}
+
+Хеш-суммы подсчитываются для файла с данными, файла с индексами, файла с количеством элементов в куске и файла с засечками.
+
+%\cite{https://clickhouse.com/codebrowser/ClickHouse/src/Storages/MergeTree/MergeTreeDataPartWriterCompact.cpp.html#_ZN2DB30MergeTreeDataPartWriterCompact14addToChecksumsERNS_26MergeTreeDataPartChecksumsE}
+
+% (https://clickhouse.com/codebrowser/ClickHouse/src/Storages/MergeTree/MergeTreeDataPartChecksum.cpp.html#_ZNK2DB26MergeTreeDataPartChecksums5writeERNS_11WriteBufferE)
+Данные хранятся в сжатом виде, жмутся кодеком по умолчанию (LZ4). Порядок записи следующий:
+\begin{itemize}
+    \item [---] строка <<checksums format version: 4>>;
+    \item [---] хеш-сумма сжимающего буфера (16 байт);
+    \item [---] заголовок кодека (9 байт);
+    \item [---] количество файлов (как число переменной длины, в данном случае 1);
+    \item [---] для каждого файла:
+        \begin{itemize}
+            \item [---] имя файла;
+            \item [---] размер файла;
+            \item [---] хеш-сумма файла;
+            \item [---] булевый признак сжатия;
+            \item [---] размер расжатых данных (если булевый признак сжатия --- истина);
+            \item [---] хеш-сумма расжатых данных (если булевый признак сжатия --- истина).
+        \end{itemize}
+\end{itemize}
+
+С учетом того, что менялся только \texttt{data.bin}, требуется поменять хеш-сумму только для него. Содержимое файла после изменений представлено в листинге \ref{code:checksumsnew}. Хеш-сумма не была сжата, поэтому размер файла не изменился.
+
+\begin{lstlisting}[label=code:checksumsnew, caption={Хеш-суммы, описанные в файле \texttt{checksums.txt} после внесения изменений.}]
+63 68 65 63 6b 73 75 6d  73 20 66 6f 72 6d 61 74  |checksums format|
+20 76 65 72 73 69 6f 6e  3a 20 34 0a 67 cf 30 a7  | version: 4.g.0.|
+25 ce b0 4e 0e 75 28 87  2a 91 be 42 82 8e 00 00  |%..N.u(.*..B....|
+00 84 00 00 00 f1 3c 04  09 63 6f 75 6e 74 2e 74  |......<..count.t|
+78 74 01 96 fc d9 4b 53  ab 22 6f 33 9a be c4 ce  |xt....KS."o3....|
+28 da 5d 00 08 64 61 74  61 2e 62 69 6e 8b 01 5c  |(.]..data.bin..\|
+70 1c a6 71 6a e6 e7 f3  d7 70 27 28 d3 99 12 01  |p..qj....p'(....|
+40 24 e8 86 e7 dd 22 a9  de f5 3b 07 c6 0f 91 6d  |@$...."...;....m|
+7e 09 2d 00 f0 25 6d 72  6b 33 70 eb db 30 3d 91  |~.-..%mrk3p..0=.|
+74 86 b7 33 12 22 5a 25  89 00 cb 00 0b 70 72 69  |t..3."Z%.....pri|
+6d 61 72 79 2e 69 64 78  10 f6 15 da b1 a5 50 1e  |mary.idx......P.|
+18 54 ae 68 d7 22 30 aa  ee 00                    |.T.h."0...|
+\end{lstlisting}
+
+Вывод проверки после проведенных изменений показан в листинге \ref{code:errchain}.
+
+\begin{lstlisting}[label=code:errchain, caption={Результат проверки после исправления \texttt{checksums.txt}}]
+CHECK TABLE cats
+FORMAT Vertical
+
+Query id: dbcbc244-10f0-491d-85e7-849377ac73e0
+
+Row 1:
+──────
+part_path: all_1_1_0
+is_passed: 1
+message:
+
+Row 2:
+──────
+part_path: parts chain
+is_passed: 0
+message:   One or more parts before all_1_1_0 were deleted OR part itself is not valid!
+\end{lstlisting}
+
+Проверка показывает, что теперь нарушена цепь хеш-сумм блоков. Полный алгоритм построения цепи хеш-сумм и код алгоритма описаны в конструкторском и технологическом разделах. Файл с цепью хеш-сумм содержит в себе информацию о массиве чисел размером 8 байт. для 1 куска содержится 16 байт информации. После пересчета хеш-суммы и замены значений в файле \\ \texttt{commited\_parts\_chain.bin} вывод не поменяется, так как данные о значениях цепочки кэшируются в оперативной памяти. Данный факт вынуждает злоумышленника сделать так, чтобы СУБД перезапустилась. При перезапуске сервера значения цепи хеш-сумм поменяются на нужные и получится вывод, показанный в листинге \ref{code:checkok}.
+
+\begin{lstlisting}[label=code:checkok, caption={Результат проверки после исправления \texttt{commited\_parts\_chain.bin}.}]
+CHECK TABLE cats
+FORMAT Vertical
+
+Query id: 95e1ae1c-203e-488b-a0a2-f3885ab4aff1
+
+Row 1:
+──────
+part_path: all_1_1_0
+is_passed: 1
+message:
+
+Row 2:
+──────
+part_path: parts chain
+is_passed: 1
+message:
+\end{lstlisting}
+
+Как итог, чтобы проверка куска проходила успешно, требуется:
+\begin{enumerate}
+    \item пересчитать значение хеш-суммы сжатого блока, в который было внесено изменение;
+    \item пересчитать значение хеш-суммы файла \texttt{data.bin} в файле \texttt{checksums.txt};
+    \item пересчитать значение цепи хеш-сумм в файле \texttt{commited\_parts\_chain.bin}.
+\end{enumerate}
+
+При удалении потребуется сделать только последний шаг. Аналогично потребуется поступить при замене куска (то есть при удалении и вставке куска с аналогичной структурой). Подобные сценарии неправомерного доступа проходили бы при старом методе хранения данных.
+
+\subsubsection{Широкое хранение}
+
+Для широкого хранения следует рассмотреть отличия от приведенного выше алгоритма действий:
+\begin{enumerate}
+    \item изменение сжатого блока и его хеш-суммы будет происходит в соответсвующем нужному столбцу файле;
+    \item изменение в файле \texttt{checksums.txt} будет происходить для файла, соответствующего меняемому столбцу.
+\end{enumerate}
+
+\subsection{Работа системы с шифрованием данных}
+
+Шифрование можно настроить на нескольких уровнях:
+\begin{itemize}
+    \item [---] на уровне отдельных столбцов;
+    \item [---] на уровне виртуального диска (пути в файловой системе, который будет передан ClickHouse через конфигурационный файл).
+\end{itemize}
+
+Шифрование на уровне столбцов позволяет злоумышленнику менять файлы с индексами, а также файлы с засечками, что в совокупности позволяет сделать так, чтобы при выборке данных с условием на первичный ключ данные какого-либо куска не читались вовсе, что аналогично их удалению. Однако на запросы, которые не имеют ограничений на первичный ключ, данный подход не подействует.
+
+Пусть имеется шифрование на уровне виртуального диска. Пример конфигурации для такого шифрования приведен в листинге \ref{code:config}.
+
+\begin{lstlisting}[label=code:config, caption={Параметры конфигурации для шифрования на уровне диска.}]
+<storage_configuration>
+    <disks>
+        <disk1>
+            <type>local</type>
+            <path>/ClickHouse/build/programs/disk/</path>
+        </disk1>
+        <default>
+            <type>encrypted</type>
+            <disk>disk1</disk>
+            <path>enc/</path>
+            <algorithm>AES_256_CTR</algorithm>
+            <key>12340000000000001234000000000000</key>
+        </default>
+    </disks>
+</storage_configuration>
+\end{lstlisting}
+
+Тогда в случае повторения запросов из листинга \ref{code:createtable1}, данные, записанные в файл, будут выглядеть так, как показано в листинге \ref{code:encrypted}.
+
+\begin{lstlisting}[label=code:encrypted, caption={Данные при шифровании диска.}]
+45 4e 43 01 00 02 00 00  00 00 00 00 00 00 00 05  |ENC.............|
+31 8d 4f 11 c1 c1 3b 78  ae 20 b6 59 7b ff 67 f4  |1.O...;x. .Y{.g.|
+00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+f9 82 0a 75 5f 80 01 de  36 e4 22 e9 78 b1 5a 8e  |...u_...6.".x.Z.|
+8a 24 e2 2b 2b 57 5b cc  71 18 96 ea af ce 21 e8  |.$.++W[.q.....!.|
+e7 20 5c 8b 26 20 98 8d  e9 34 17 cb a9 82 72 43  |. \.& ...4....rC|
+ba fc b6 3b f6 f2 78 a2  89 a0 a2 80 b5 4e e5 3b  |...;..x......N.;|
+b3 30 f9 e5 6b 20 f5 c0  ef 77 a2 6b 2f ce 4e 0c  |.0..k ...w.k/.N.|
+e5 31 af 8c 1c 2f 55 e1  27 9d db 70 24 bc 92 de  |.1.../U.'..p$...|
+3e 8c 91 12 83 1c 90 1a  f7 2b a1 1a ce c4 56 c3  |>........+....V.|
+a7 e0 62 f8 92 d7 c1 e5  23 eb 64 df 79 5f 15 3d  |..b.....#.d.y_.=|
+02 b4 c0 e6 de 12 f0 b2  a4 f9 7e                 |..........~|
+\end{lstlisting}
+
+Шифрование не позволяет исправить хеш-суммы подобно тому, как это выполнялось без него. Требуется проверить:
+\begin{itemize}
+    \item [---] что работают все стандартные операции:
+        \begin{itemize}
+            \item [---] вставка;
+            \item [---] слияние;
+            \item [---] мутация.
+        \end{itemize}
+    \item [---] что неправомерные удаление и изменение блока обнаружаются.
+\end{itemize}
+
+\pagebreak
+
+\subsubsection{Проверка работы стандартных операций}
+
+Для проверки корректности работы цепи хеш-сумм со вставкой можно сделать 3 вставки командой из листинга \ref{code:createtable1}. Результат проверки таблицы в листинге \ref{code:check1}.
+
+\begin{lstlisting}[label=code:check1, caption={Результат проверки после вставки 4 блоков.}]
+CHECK TABLE cats
+FORMAT Vertical
+
+Query id: 70296b3b-a0ec-4938-b731-a47310bc32b8
+
+Row 1:
+──────
+part_path: all_1_1_0
+is_passed: 1
+message:
+
+Row 2:
+──────
+part_path: all_2_2_0
+is_passed: 1
+message:
+
+Row 3:
+──────
+part_path: all_3_3_0
+is_passed: 1
+message:
+
+Row 4:
+──────
+part_path: all_4_4_0
+is_passed: 1
+message:
+
+Row 5:
+──────
+part_path: parts chain
+is_passed: 1
+message:
+\end{lstlisting}
+
+Для проверки слияния можно сделать еще 3 вставки. Результат проверки в листинге \ref{code:check2}. Из проверки видно, что произошло слияние блоков с 1 по 5, цепь осталась валидной.
+
+\begin{lstlisting}[label=code:check2, caption={Результат проверки после вставки 7 блоков.}]
+CHECK TABLE cats
+FORMAT Vertical
+
+Query id: c0888295-5a25-4528-8a96-7e8ba7762d00
+
+Row 1:
+──────
+part_path: all_1_5_1
+is_passed: 1
+message:
+
+Row 2:
+──────
+part_path: all_6_6_0
+is_passed: 1
+message:
+
+Row 3:
+──────
+part_path: all_7_7_0
+is_passed: 1
+message:
+
+Row 4:
+──────
+part_path: parts chain
+is_passed: 1
+message:
+\end{lstlisting}
+
+Для проверки работы мутаций следует выполнить запрос из листинга \ref{code:mut}. Результат проверки таблицы после проведения мутации представлен в листинге \ref{code:check3}, цепь хеш-сумм осталась валидной.
+
+\begin{lstlisting}[language=sql, label=code:mut, caption={Запрос мутации.}]
+ALTER TABLE cats UPDATE age=age + 1 WHERE age < 17;
+\end{lstlisting}
+
+\pagebreak
+
+\begin{lstlisting}[label=code:check3, caption={Проверка таблицы после мутации.}]
+CHECK TABLE cats
+FORMAT Vertical
+
+Query id: aed93f24-7417-4424-8d16-cac981c1d240
+
+Row 1:
+──────
+part_path: all_1_5_1_8
+is_passed: 1
+message:
+
+Row 2:
+──────
+part_path: all_6_6_0_8
+is_passed: 1
+message:
+
+Row 3:
+──────
+part_path: all_7_7_0_8
+is_passed: 1
+message:
+
+Row 4:
+──────
+part_path: parts chain
+is_passed: 1
+message:
+\end{lstlisting}
+
+\subsubsection{Проверка обнаружения неправомерных удаления и изменения кусков}
+
+Для проверки обнаружения неправомерного удаления можно удалить кусок \texttt{all\_7\_7\_0\_8}. Вывод проверки представлен в листинге \ref{code:checkerr1}, вывод проверки после перезагрузки системы представлен в листинге \ref{code:checkerr2}. В обоих случаях показано, что данные были изменены где-то вне системы.
+
+\pagebreak
+
+\begin{lstlisting}[label=code:checkerr1, caption={Вывод системы после неправомерного удаления куска.}]
+CHECK TABLE cats
+FORMAT Vertical
+
+Query id: 6aa87471-30e7-4c8c-8c79-e3243ee936ae
+
+Row 1:
+──────
+part_path: all_1_5_1_8
+is_passed: 1
+message:
+
+Row 2:
+──────
+part_path: all_6_6_0_8
+is_passed: 1
+message:
+
+Row 3:
+──────
+part_path: all_7_7_0_8
+is_passed: 0
+message:   Check of part finished with error: 'Cannot open file /ClickHouse/build/programs/disk/enc/store/cf0/cf01ce53-cba4-4afb-8e11-26b487355f84/all_7_7_0_8/columns.txt, errno: 2, strerror: No such file or directory'
+\end{lstlisting}
+
+\pagebreak
+
+\begin{lstlisting}[label=code:checkerr2, caption={Вывод системы после неправомерного удаления куска после перезагрузки системы.}]
+CHECK TABLE cats
+FORMAT Vertical
+
+Query id: 362f64b5-a480-4f2a-b1ad-0c021a110c53
+
+Row 1:
+──────
+part_path: all_1_5_1_8
+is_passed: 1
+message:
+
+Row 2:
+──────
+part_path: all_6_6_0_8
+is_passed: 1
+message:
+
+Row 3:
+──────
+part_path: parts chain
+is_passed: 0
+message:   Some parts in the end of the chain were deleted
+\end{lstlisting}
+
+Для проверки обнаружения неправомерного изменения можно изменить последовательность байт в зашифрованном файле с данными одного из кусков, например, \texttt{all\_7\_7\_0\_8}. После изменения данных командой из листинга \ref{code:dd} получается результат проверки из листинга \ref{code:checkattack}. Данное было бы обнаружено и до оптимизации метода, потому что, как было замечено в констуркторской части, при изменении данных изменяются еще и хеш-суммы файлов и сжатых блоков, которые были и до модификации метода.
+
+\begin{lstlisting}[label=code:dd, caption={Неправомерное изменение данных.}]
+printf '\x31' | dd of=cats/all_7_7_0_8/data.bin bs=1 seek=183 count=1 conv=notrunc
+\end{lstlisting}
+
+\pagebreak
+
+\begin{lstlisting}[label=code:checkattack, caption={Результат проверки после неправомерного изменения данных.}]
+CHECK TABLE cats
+FORMAT Vertical
+
+Query id: 3b86fbe1-b13e-4006-8e92-0d460a52784f
+
+Row 1:
+──────
+part_path: all_1_5_1_8
+is_passed: 1
+message:
+
+Row 2:
+──────
+part_path: all_6_6_0_8
+is_passed: 1
+message:
+
+Row 3:
+──────
+part_path: all_7_7_0_8
+is_passed: 0
+message:   Checksum mismatch for file data.bin in data part
+\end{lstlisting}
 
 \subsection*{Вывод}
+
+В данном разделе были рассмотрены способы обхода защиты системы, работающей без шифрования, было показано правильное функционирование с шифрованием и применением стандартных операций, а также проверена возможность обнаружения неправомерных действий.
 
 \pagebreak

@@ -1,4 +1,64 @@
 \section*{ПРИЛОЖЕНИЕ A}
 \addcontentsline{toc}{section}{ПРИЛОЖЕНИЕ A}
 
+\begin{lstlisting}[label=code:updrename, caption={Изменение состояний блоков (переименование блока).}]
+bool MergeTreeData::renameTempPartAndReplace(
+    MutableDataPartPtr &part, MergeTreeTransaction *txn,
+    SimpleIncrement *increment, Transaction *out_transaction,
+    std::unique_lock<std::mutex> &lock, DataPartsVector *out_covered_parts,
+    MergeTreeDeduplicationLog *deduplication_log,
+    std::string_view deduplication_token)
+{
+    // ...
+    part->name = part_name;
+    part->info = part_info;
+    part->is_temp = false;
+    part->setState(DataPartState::PreActive);
+
+    if (parts_chainer) {
+        DataParts active_parts;
+        auto range = getDataPartsStateRange(DataPartState::Active);
+        active_parts.insert(range.begin(), range.end());
+        auto need_commit_chain =
+                parts_chainer->precommitChain(active_parts, part, covered_parts, lock);
+
+        part->renameTo(part_name, true);
+
+        if (need_commit_chain)
+            parts_chainer->commitChain(lock);
+    } else {
+        part->renameTo(part_name, true);
+    }
+
+    auto part_it = data_parts_indexes.insert(part).first;
+    MergeTreeTransaction::addNewPartAndRemoveCovered(shared_from_this(), part,
+        covered_parts, txn);
+\end{lstlisting}
+
+\pagebreak
+
+\begin{lstlisting}[label=code:updrename2, caption={Изменение состояний блоков (переименование блока). Продолжение.}]
+    if (out_transaction) {
+        out_transaction->precommitted_parts.insert(part);
+    } else {
+        size_t reduce_bytes = 0;
+        size_t reduce_rows = 0;
+        size_t reduce_parts = 0;
+        auto current_time = time(nullptr);
+        for (const DataPartPtr &covered_part : covered_parts) {
+            covered_part->remove_time.store(current_time, std::memory_order_relaxed);
+            modifyPartState(covered_part, DataPartState::Outdated);
+            removePartContributionToColumnAndSecondaryIndexSizes(covered_part);
+            reduce_bytes += covered_part->getBytesOnDisk();
+            reduce_rows += covered_part->rows_count;
+            ++reduce_parts;
+        }
+
+        modifyPartState(part_it, DataPartState::Active);
+        addPartContributionToColumnAndSecondaryIndexSizes(part);
+        // ...
+    }
+}
+\end{lstlisting}
+
 \pagebreak
