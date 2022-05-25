@@ -1,0 +1,4 @@
+[submodule "ClickHouse"]
+	path = ClickHouse
+	url = https://github.com/Justarone/ClickHouse/
+	branch = merge-tree-parts-chaining
