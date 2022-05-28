@@ -1,15 +1,25 @@
 \section{Технологическая часть}
 
-В данном разделе рассматриваются используемые инструменты и технологии для реализации описанного метода, а также сама реализация.
+В данном разделе рассматриваются используемые инструменты и технологии, диаграмма классов для реализуемого метода, а также сама реализация.
 
 \subsection{Выбор инструментов и технологий}
 
 В качестве языка программирования был выбран C++ \cite{cpp} в связи с тем, что на этом языке программирования написана СУБД ClickHouse, для которой данный метод реализуется.
 
-
 В качестве компилятора был выбран компилятор Clang \cite{clang} 12 версии в связи с тем, что на официальном сайте ClickHouse рекомендуется использовать Clang выше 11 версии \cite{chcompiler}.
 
 Для сборки проекта используются утилиты CMake \cite{cmake} и Ninja \cite{ninjabuild}, в проекте уже присутствуют требуемые конфигурационные файлы и сборка полностью автоматизирована.
+
+\subsection{Диаграмма классов реализуемого метода}
+
+На рисунке \ref{fig:classscheme} представлена диаграмма классов реализуемого метода.
+
+\begin{figure}[hbtp]
+	\centering
+	\includegraphics[scale=0.8]{img/classscheme.pdf}
+	\caption{Диаграмма классов реализуемого метода.}
+	\label{fig:classscheme}
+\end{figure}
 
 \subsection{Код объекта, отвечающего за построение цепи хеш-сумм}
 
@@ -23,34 +33,30 @@
 \pagebreak
 
 \begin{lstlisting}[label=code:interface, caption={Класс \texttt{MergeTreeDataChainer}.}]
-class MergeTreeDataChainer {
+class MergeTreeDataChainer
+{
     using Checksum = UInt64;
-    using Checksums = std::vector<Checksum>;
 
 public:
-    MergeTreeDataChainer(DiskPtr disk, String relative_storage_path,
-        Poco::Logger *log = nullptr);
-    bool precommitChain(DataParts &data_parts, const
-        DataPartPtr &part_to_add,
-        const DataPartsVector &parts_to_remove,
-        const DataPartsLock &lock);
-    CheckResult checkConsistency(const DataParts &data_parts,
-        const DataPartsLock & /*lock*/);
+    MergeTreeDataChainer(DiskPtr disk, String relative_storage_path, Poco::Logger * log = nullptr);
+    bool precommitChain(DataParts & data_parts, const DataPartPtr & part_to_add,
+        const DataPartsVector & parts_to_remove, const DataPartsLock & lock);
+    CheckResult checkConsistency(const DataParts & data_parts, const DataPartsLock & /*lock*/);
+    void setIgnoreOnInconsistency(const bool new_value) { ignore_on_inconsistency = new_value; }
+    void setThrowOnInconsistency(const bool new_value) { throw_on_inconsistency = new_value; }
     void commitChain(const DataPartsLock & /*lock*/);
 
 private:
-    Checksums calculateChain(const DataParts &data_parts);
-    std::optional<String> compareChains(const Checksums &checksums,
-        const Checksums &written, const DataParts &data_parts);
-    static void transformToFutureState(DataParts &data_parts,
-        const DataPartPtr &part_to_add,
-        const DataPartsVector &parts_to_remove);
-    CommitFinisherPtr precommitChain(const DataParts &data_parts,
-        const DataPartsLock & /*lock*/);
-    void updateFromOnePart(SipHash &hash, const DataPart &data_parts);
+    Checksum calculateChain(const DataParts & data_parts);
+    static void transformToFutureState(DataParts & data_parts, const DataPartPtr & part_to_add,
+        const DataPartsVector & parts_to_remove);
+    void precommitChain(const DataParts & data_parts, const DataPartsLock & /*lock*/);
+    void updateFromOnePart(SipHash & hash, const DataPart & data_parts);
 
     State state;
-    Poco::Logger *log;
+    Poco::Logger * log;
+    bool throw_on_inconsistency = false;
+    bool ignore_on_inconsistency = false;
 };
 \end{lstlisting}
 
@@ -59,24 +65,26 @@ private:
 \pagebreak
 
 \begin{lstlisting}[label=code:validation, caption={Валидация цепи хеш-сумм.}]
-CheckResult MergeTreeData::MergeTreeDataChainer::checkConsistency(
-        const DataParts &data_parts, const DataPartsLock & /*lock*/) {
-    const auto checksums = calculateChain(data_parts);
+CheckResult MergeTreeData::MergeTreeDataChainer::checkConsistency(const DataParts & data_parts, const DataPartsLock & /*lock*/) {
+    if (data_parts.size() == 0) {
+        const auto pending = state.readPending(), commited = state.readCommited();
+        return pending == 0 && commited == 0
+            ? CheckResult("parts_chain", true, "")
+            : CheckResult("parts_chain", false, "no parts, but not empty checksums: " + std::to_string(pending) + " and " + std::to_string(commited));
+    }
+    const auto checksum = calculateChain(data_parts);
     const auto commited = state.readCommited();
-    auto error = compareChains(checksums, commited, data_parts);
-    if (!error)
+    if (commited == checksum)
         return CheckResult("parts chain", true, "");
 
     const auto pending = state.readPending();
-    error = compareChains(checksums, pending, data_parts);
-    if (!error) {
+    if (pending == checksum) {
         if (log)
-            log->warning(
-                    "parts chain is verified with pending value, rewriting commited");
-        state.writeCommited(checksums);
+            log->warning("parts chain is verified with pending value, rewriting commited");
+        state.writeCommited(checksum);
         return CheckResult("parts chain", true, "");
     }
-    return CheckResult("parts chain", false, std::move(*error));
+    return CheckResult("parts chain", false, "Parts chain is not valid!");
 }
 \end{lstlisting}
 
@@ -85,27 +93,21 @@ CheckResult MergeTreeData::MergeTreeDataChainer::checkConsistency(
 \pagebreak
 
 \begin{lstlisting}[label=code:calcchain, caption={Расчет цепи хеш-сумм.}]
-MergeTreeData::MergeTreeDataChainer::Checksums
-MergeTreeData::MergeTreeDataChainer::calculateChain(
-        const DataParts &data_parts) {
-    Checksums result;
-    result.reserve(data_parts.size());
-
-    SipHash prev{0, 0};
-    for (const auto &part : data_parts) {
+MergeTreeData::MergeTreeDataChainer::Checksum
+MergeTreeData::MergeTreeDataChainer::calculateChain(const DataParts & data_parts) {
+    if (data_parts.size() == 0)
+        return 0;
+    Checksum prev = 0;
+    for (const auto& part : data_parts) {
         SipHash hash{0, 0};
         hash.update(prev);
         updateFromOnePart(hash, *part);
-
-        const auto hash_value = hash.get64();
-        prev = hash;
-        result.push_back(hash_value);
+        prev = hash.get64();
     }
-    return result;
+    return prev;
 }
-void MergeTreeData::MergeTreeDataChainer::updateFromOnePart(
-        SipHash &hash, const DataPart &data_part) {
-    for (const auto &[file, checksum] : data_part.checksums.files) {
+void MergeTreeData::MergeTreeDataChainer::updateFromOnePart(SipHash & hash, const DataPart & data_part) {
+    for (const auto& [file, checksum] : data_part.checksums.files) {
         hash.update(file);
         hash.update(checksum);
     }
@@ -122,37 +124,27 @@ void MergeTreeData::MergeTreeDataChainer::updateFromOnePart(
 \pagebreak
 
 \begin{lstlisting}[label=code:precommitChain, caption={Метод \texttt{precommitChain}.}]
-MergeTreeData::MergeTreeDataChainer::CommitFinisherPtr
-MergeTreeData::MergeTreeDataChainer::precommitChain(
-    DataParts &data_parts, const DataPartPtr &part_to_add,
-    const DataPartsVector &parts_to_remove, const DataPartsLock &lock)
-{
+bool MergeTreeData::MergeTreeDataChainer::precommitChain(DataParts & data_parts,
+    const DataPartPtr & part_to_add, const DataPartsVector & parts_to_remove, const DataPartsLock & lock) {
     if (!checkConsistency(data_parts, lock).success) {
         if (log)
-            log->error("Parts chain is inconsistent (force update: " +
-                                 std::to_string(force_updates) + ")");
-        if (!force_updates)
+            log->error("Parts chain is inconsistent (ignoring inconsistency: " + std::to_string(ignore_on_inconsistency) + ")");
+        if (throw_on_inconsistency)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Parts chain is inconsistent and throw mode is set.");
+        if (!ignore_on_inconsistency)
             return false;
     }
     transformToFutureState(data_parts, part_to_add, parts_to_remove);
-    return precommitChain(data_parts, lock);
-}
-
-MergeTreeData::MergeTreeDataChainer::CommitFinisherPtr
-MergeTreeData::MergeTreeDataChainer::precommitChain(
-    const DataParts &data_parts, const DataPartsLock & /*lock*/)
-{
-    const auto checksum = calculateChain(data_parts);
-    state.writePending({checksum});
+    precommitChain(data_parts, lock);
     return true;
 }
-
-void MergeTreeData::MergeTreeDataChainer::transformToFutureState(
-    DataParts &data_parts, const DataPartPtr &part_to_add,
-    const DataPartsVector &parts_to_remove)
-{
+void MergeTreeData::MergeTreeDataChainer::precommitChain(const DataParts & data_parts, const DataPartsLock & /*lock*/) {
+    state.writePending(calculateChain(data_parts));
+}
+void MergeTreeData::MergeTreeDataChainer::transformToFutureState(DataParts & data_parts,
+    const DataPartPtr & part_to_add, const DataPartsVector & parts_to_remove) {
     data_parts.insert(part_to_add);
-    for (const auto &part : parts_to_remove)
+    for (const auto& part : parts_to_remove)
         data_parts.erase(part);
 }
 \end{lstlisting}
@@ -160,5 +152,9 @@ void MergeTreeData::MergeTreeDataChainer::transformToFutureState(
 \subsection{Код изменения состояний активных блоков}
 
 Как было описано в аналитической части и в схемах алгоритмов, улучшение метода хранения, которое позволяет доказывать неправомерное удаление, работает в тот момент, когда происходит изменения состояний блоков. Это происходит в функции \texttt{renameTempPartAndReplace} класса \texttt{MergeTreeData}. Код с использованием цепи хеш-сумм, описан в листингах \ref{code:updrename} и \ref{code:updrename2} в приложении А.
+
+\subsection{Выводы}
+
+В данном разделе были рассмотрены используемые инструменты и технологии, диаграмма классов для реализуемого метода, а также сама реализация.
 
 \pagebreak
